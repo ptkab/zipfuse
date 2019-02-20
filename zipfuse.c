@@ -4,10 +4,66 @@
 #include <stdlib.h>
 #include <zip.h>
 #include <fuse.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <errno.h> 
 
-static int zipfuse_getattr(const char *path, struct stat *stbuf,
-			 struct fuse_file_info *fi)
+zip_t* archive;
+
+// this function is called by fuse everytime before any other function call
+// so this needs to be the first function that should be implemented
+static int zipfuse_getattr(const char *path, struct stat *stbuf)
+			 //struct fuse_file_info *fi)
 {
+    // (void) fi;
+	// int res = 0;
+
+    //declare and initialize zip stat buffer using libzip 
+    zip_stat_t sfile;
+    zip_stat_init(&sfile);
+
+    // check if path is root. Set file stats nlink as 2 and
+    // mode masked as S_IFDIR masked with 0755, as given in hello.c file
+    // of libfuse documentation.
+    // else check if the zip file path is dir or file. 
+    if (strcmp(path, "/") == 0) {
+		stbuf->st_mode = S_IFDIR | 0755;
+		stbuf->st_nlink = 2;
+    } else {
+        
+        // paths do not have an ending slash. we need to add it ourselves to check
+        // if they are directories.
+        int path_length = strlen(path);
+        char* path_with_slash = malloc(path_length + 3);
+        strcpy(path_with_slash, path);
+        path_with_slash[path_length] = '/';
+        path_with_slash[path_length + 1] = 0;
+
+        //check if path is actually a directory. If yes, then set file stats
+        // of a directory in stbuf
+        if (zip_name_locate(archive, path_with_slash, 0) != -1) {
+            zip_stat(archive, path_with_slash, 0, &sfile);
+            stbuf->st_mode = S_IFDIR | 0755;
+            stbuf->st_nlink = 2;
+            stbuf->st_size = 0;
+            stbuf->st_mtime = sfile.mtime;
+        //if not, check if path is a regular file. Then set file stats of file
+        // in stbuf
+        } else if (zip_name_locate(archive, path + 1, 0) != -1){
+            zip_stat(archive, path + 1, 0, &sfile);
+            stbuf->st_mode = S_IFREG | 0777;
+            stbuf->st_nlink = 1;
+            stbuf->st_size = sfile.size;
+            stbuf->st_mtime = sfile.mtime;
+
+        // if all fails, that means we dont have permission to this file or it
+        // is invalid. Return ENOENT in this case. 
+        //(reference hello.c example from libfuse documentation)
+        } else {
+            return -ENOENT;
+        }
+    }
+
 	return 0;
 }
 
@@ -28,6 +84,7 @@ static int zipfuse_read(const char *path, char *buf, size_t size, off_t offset,
 	return 0;
 }
 
+// override the fuse operations with our custom functions to operate on zip file
 static struct fuse_operations zipfuse_oper = {
 	.getattr    = zipfuse_getattr,
 	.readdir    = zipfuse_readdir,
@@ -52,7 +109,7 @@ int main(int argc, char *argv[]) {
     //if zip_open fails, it means user has passed an invalid or non-zip file.
     //in that case, terminate program. 
     char* archive_name = argv[1];
-    zip_t* archive = zip_open(archive_name, 0, NULL);
+    archive = zip_open(archive_name, 0, NULL);
     if (!archive) {
         printf("\nFailed to open archive. Either archive is invalid "); 
         printf("or not a ZIP file\n\n");
