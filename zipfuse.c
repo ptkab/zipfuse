@@ -70,6 +70,17 @@ static int zipfuse_getattr(const char *path, struct stat *stbuf)
 static int zipfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			 off_t offset, struct fuse_file_info *fi)
 {
+	(void) offset;
+	(void) fi;
+	(void) flags;
+
+	if (strcmp(path, "/") != 0)
+		return -ENOENT;
+
+	filler(buf, ".", NULL, 0, 0);
+	filler(buf, "..", NULL, 0, 0);
+	filler(buf, options.filename, NULL, 0, 0);
+
 	return 0;
 }
 
@@ -81,7 +92,20 @@ static int zipfuse_open(const char *path, struct fuse_file_info *fi)
 static int zipfuse_read(const char *path, char *buf, size_t size, off_t offset,
 		      struct fuse_file_info *fi)
 {
-	return 0;
+	size_t len;
+	(void) fi;
+	if(strcmp(path+1, options.filename) != 0)
+		return -ENOENT;
+
+	len = strlen(options.contents);
+	if (offset < len) {
+		if (offset + size > len)
+			size = len - offset;
+		memcpy(buf, options.contents + offset, size);
+	} else
+		size = 0;
+
+	return size;
 }
 
 // override the fuse operations with our custom functions to operate on zip file
