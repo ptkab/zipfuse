@@ -70,23 +70,32 @@ static int zipfuse_getattr(const char *path, struct stat *stbuf)
 static int zipfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			 off_t offset, struct fuse_file_info *fi)
 {
-	(void) offset;
-	(void) fi;
-	(void) flags;
+	// (void) offset;
+	// (void) fi;
+	// (void) flags;
 
-	if (strcmp(path, "/") != 0)
-		return -ENOENT;
+	// if (strcmp(path, "/") != 0)
+	// 	return -ENOENT;
 
-	filler(buf, ".", NULL, 0, 0);
-	filler(buf, "..", NULL, 0, 0);
-	filler(buf, options.filename, NULL, 0, 0);
+	// filler(buf, ".", NULL, 0, 0);
+	// filler(buf, "..", NULL, 0, 0);
+	// filler(buf, options.filename, NULL, 0, 0);
 
 	return 0;
 }
 
 static int zipfuse_open(const char *path, struct fuse_file_info *fi)
 {
-	return 0;
+    // check if file present by tring to open it
+    // zip_fopen(archive, path, 0);
+    // zip_name_locate(archive, path + 1, 0)
+    
+    // if name_locate returns index anything but -1, means file can be opened.
+    if (zip_name_locate(archive, path + 1, 0) != 1) {
+        return 0;
+    }
+
+	return -ENOENT;
 }
 
 static int zipfuse_read(const char *path, char *buf, size_t size, off_t offset,
