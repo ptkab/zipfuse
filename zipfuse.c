@@ -92,20 +92,37 @@ static int zipfuse_open(const char *path, struct fuse_file_info *fi)
 static int zipfuse_read(const char *path, char *buf, size_t size, off_t offset,
 		      struct fuse_file_info *fi)
 {
-	size_t len;
-	(void) fi;
-	if(strcmp(path+1, options.filename) != 0)
-		return -ENOENT;
+	// (void) fi;
 
-	len = strlen(options.contents);
-	if (offset < len) {
-		if (offset + size > len)
-			size = len - offset;
-		memcpy(buf, options.contents + offset, size);
-	} else
-		size = 0;
+    // get file descriptor of file at current path
+    zip_file_t* desc = zip_fopen(archive, path + 1, 0);
+    //if desc is not valid, then return with ENOENT
+    if (!desc) {
+        return -ENOENT;
+    }
 
-	return size;
+    // initialize zip file stats buffer like we did in get_attr function
+    // and fill it with zip_stat() . We need size from sfile to set buffer size.
+    zip_stat_t sfile;
+    zip_stat_init(&sfile);
+    zip_stat(archive, path + 1, 0, &sfile);
+
+    // read bytes from the 'offset' till 'size' in a buffer.
+    // Total size is offset + size + the size returned by stat buffer.
+    char buffer[offset + size + sfile.size];
+
+    //read data in our buffer. check if data is read properly else return ENOENT
+    if (zip_fread(desc, buffer, sfile.size) == -1) {
+        return -ENOENT;
+    }
+
+    // copy the data into 'buf'
+    memcpy(buf, buffer + offset, size);
+    zip_fclose(desc);
+
+    // I dont know why 'size' is returned. It was in hello.c file
+    // so I have left it as it is.
+    return size;
 }
 
 // override the fuse operations with our custom functions to operate on zip file
