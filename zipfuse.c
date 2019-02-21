@@ -6,140 +6,234 @@
 #include <fuse.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <errno.h> 
+#include <errno.h>
+#include <libgen.h>
 
-zip_t* archive;
+zip_t *archive;
 
-// this function is called by fuse everytime before any other function call
-// so this needs to be the first function that should be implemented
-static int zipfuse_getattr(const char *path, struct stat *stbuf)
-			 //struct fuse_file_info *fi)
+enum type
 {
-    // (void) fi;
-	// int res = 0;
+    DIRECTORY = 1,
+    FILES = 2
+};
 
-    //declare and initialize zip stat buffer using libzip 
-    zip_stat_t sfile;
-    zip_stat_init(&sfile);
+static char* addslash(const char* path)
+{
+    int length = strlen(path);
+    char *temp_str = malloc(length + 2);
+    memcpy((void*) temp_str, (const void*) path, sizeof(char)* length);
+    temp_str[length] ='/';
+    temp_str[length + 1] = '\0';
+    return temp_str;
+}
 
-    // check if path is root. Set file stats nlink as 2 and
-    // mode masked as S_IFDIR masked with 0755, as given in hello.c file
-    // of libfuse documentation.
-    // else check if the zip file path is dir or file. 
+static int zipfuse_open(const char *path, struct fuse_file_info *fi)
+{
+    (void) fi;
+    // if the file in zip cannot be located by name, then -1 is returned.
+    // in that case, return with error.
+    if(zip_name_locate(archive, path + 1, 0) < 0) {
+        return -ENOENT;
+    }
+    return 0;
+}
+
+static void zipfuse_destroy(void* private_data)
+{
+    (void) private_data;
+    zip_close(archive);
+}
+
+static enum type get_file_type(const char* path)
+{
+    // check if the path is root, if yes, return type DIRECTORY
     if (strcmp(path, "/") == 0) {
-		stbuf->st_mode = S_IFDIR | 0755;
-		stbuf->st_nlink = 2;
-    } else {
-        
-        // paths do not have an ending slash. we need to add it ourselves to check
-        // if they are directories.
-        int path_length = strlen(path);
-        char* path_with_slash = malloc(path_length + 3);
-        strcpy(path_with_slash, path);
-        path_with_slash[path_length] = '/';
-        path_with_slash[path_length + 1] = 0;
-
-        //check if path is actually a directory. If yes, then set file stats
-        // of a directory in stbuf
-        if (zip_name_locate(archive, path_with_slash, 0) != -1) {
-            zip_stat(archive, path_with_slash, 0, &sfile);
-            stbuf->st_mode = S_IFDIR | 0755;
-            stbuf->st_nlink = 2;
-            stbuf->st_size = 0;
-            stbuf->st_mtime = sfile.mtime;
-        //if not, check if path is a regular file. Then set file stats of file
-        // in stbuf
-        } else if (zip_name_locate(archive, path + 1, 0) != -1){
-            zip_stat(archive, path + 1, 0, &sfile);
-            stbuf->st_mode = S_IFREG | 0777;
-            stbuf->st_nlink = 1;
-            stbuf->st_size = sfile.size;
-            stbuf->st_mtime = sfile.mtime;
-
-        // if all fails, that means we dont have permission to this file or it
-        // is invalid. Return ENOENT in this case. 
-        //(reference hello.c example from libfuse documentation)
-        } else {
-            return -ENOENT;
-        }
+        return DIRECTORY;
     }
 
-	return 0;
+    char *full_path = addslash(path + 1);
+    if (zip_name_locate(archive, full_path, 0) != -1)
+        return DIRECTORY;
+    else if (zip_name_locate(archive, path + 1, 0) != -1)
+        return FILES;
+    else
+        return -1;
+}
+
+static int zipfuse_getattr(const char *path, struct stat *stbuf)
+{
+
+    if (strcmp(path, "/") == 0)
+    {
+        stbuf->st_mode = S_IFDIR | 0755;
+        stbuf->st_nlink = 2;
+        stbuf->st_size = 1;
+        return 0;
+    }
+
+    char* path_slash = addslash(path + 1);
+    enum type filetype = get_file_type(path);
+
+    zip_stat_t stat_buffer;
+    zip_stat_init(&stat_buffer);
+
+    //stbuf stats modified with reference to hello.c from libfuse documentation
+    if (filetype == DIRECTORY) {
+        zip_stat(archive, path_slash, 0, &stat_buffer);
+        stbuf->st_mode = S_IFDIR | 0755;
+        stbuf->st_size = 0;
+        stbuf->st_nlink = 2;
+        stbuf->st_mtime = stat_buffer.mtime;
+    } else if (filetype == FILES) {
+        zip_stat(archive, path + 1, 0, &stat_buffer);
+        stbuf->st_mode = S_IFREG | 0777;
+        stbuf->st_size = stat_buffer.size;
+        stbuf->st_nlink = 1;
+        stbuf->st_mtime = stat_buffer.mtime;
+    } else {
+        return -ENOENT;
+    }
+
+    return 0;
 }
 
 static int zipfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			 off_t offset, struct fuse_file_info *fi)
 {
-	// (void) offset;
-	// (void) fi;
-	// (void) flags;
 
-	// if (strcmp(path, "/") != 0)
-	// 	return -ENOENT;
+    (void) offset;
+    (void) fi;
 
-	// filler(buf, ".", NULL, 0, 0);
-	// filler(buf, "..", NULL, 0, 0);
-	// filler(buf, options.filename, NULL, 0, 0);
+    // add current and parent directories to the buf as done in hello.c
+    // of libfuse documentation
+    filler(buf, ".", NULL, 0);
+    filler(buf, "..", NULL, 0);
 
-	return 0;
-}
+    int enteries = zip_get_num_entries(archive, 0);
+    for (int i = 0; i < enteries; i++) {
+        
+        zip_stat_t stat_buffer;
+        zip_stat_index(archive, i, 0, &stat_buffer);
 
-static int zipfuse_open(const char *path, struct fuse_file_info *fi)
-{
-    // check if file present by tring to open it
-    // zip_fopen(archive, path, 0);
-    // zip_name_locate(archive, path + 1, 0)
-    
-    // if name_locate returns index anything but -1, means file can be opened.
-    if (zip_name_locate(archive, path + 1, 0) != 1) {
-        return 0;
+        // pre-pend slah to the current entery at index i
+        // this is required for the dirname function from libgen library
+        char* prepended_path = malloc(strlen(stat_buffer.name) + 2);
+        *prepended_path = '/';
+        strcpy(prepended_path + 1, stat_buffer.name);
+
+        char* base_name = strdup(prepended_path);
+
+        struct stat st;
+        memset(&st, 0, sizeof(st));
+
+        char* parent_name = strdup(prepended_path);
+        if (strcmp(path, dirname(parent_name)) == 0)
+        {
+            // remove the ending slash if present and terinate the string.
+            if (prepended_path[strlen(prepended_path) - 1] == '/') {
+                prepended_path[strlen(prepended_path) - 1] = '\0';
+            }
+
+            zipfuse_getattr(prepended_path, &st);
+            char* name = basename(base_name);
+            if (filler(buf, name, &st, 0))
+                break;
+        }
+
+        free(base_name);
+        free(parent_name);
+        free(prepended_path);
     }
 
-	return -ENOENT;
+    return 0;
 }
 
-static int zipfuse_read(const char *path, char *buf, size_t size, off_t offset,
-		      struct fuse_file_info *fi)
+static int zipfuse_read(const char *path, char *buf, size_t size,
+                     off_t offset, struct fuse_file_info* fi)
 {
-	// (void) fi;
+    (void) fi;
 
-    // get file descriptor of file at current path
+    // initialize the stat_buffer with current path file's stats
+    zip_stat_t stat_buffer;
+    zip_stat_init(&stat_buffer);
+    zip_stat(archive, path + 1, 0, &stat_buffer);
+
+    // get the current file's descriptor
     zip_file_t* desc = zip_fopen(archive, path + 1, 0);
-    //if desc is not valid, then return with ENOENT
-    if (!desc) {
+
+    int total_length = stat_buffer.size + size + offset;
+    char temp[total_length];
+    memset(temp, 0, total_length);
+
+    // if we cannot read the file then return with ENOENT error.
+    if (zip_fread(desc, temp, stat_buffer.size) == -1)
         return -ENOENT;
-    }
 
-    // initialize zip file stats buffer like we did in get_attr function
-    // and fill it with zip_stat() . We need size from sfile to set buffer size.
-    zip_stat_t sfile;
-    zip_stat_init(&sfile);
-    zip_stat(archive, path + 1, 0, &sfile);
-
-    // read bytes from the 'offset' till 'size' in a buffer.
-    // Total size is offset + size + the size returned by stat buffer.
-    char buffer[offset + size + sfile.size];
-
-    //read data in our buffer. check if data is read properly else return ENOENT
-    if (zip_fread(desc, buffer, sfile.size) == -1) {
-        return -ENOENT;
-    }
-
-    // copy the data into 'buf'
-    memcpy(buf, buffer + offset, size);
+    memcpy(buf, temp + offset, size);
     zip_fclose(desc);
 
-    // I dont know why 'size' is returned. It was in hello.c file
-    // so I have left it as it is.
     return size;
+}
+
+static int zipfuse_write(const char* path, const char *buf, size_t size, 
+                        off_t offset, struct fuse_file_info* fi)
+{
+    (void)path;
+    (void)buf;
+    (void)size;
+    (void)offset;
+    (void)fi;
+    return -EROFS;
+}
+
+static int zipfuse_mkdir(const char *path, mode_t mode)
+{
+    (void)path;
+    (void) mode;
+    return -EROFS;
+}
+
+static int zipfuse_unlink(const char* path)
+{
+    (void)path;
+    return -EROFS;
+}
+
+static int zipfuse_rmdir(const char *path)
+{
+    (void)path;
+    return -EROFS;
+}
+
+static int zipfuse_access(const char* path, int mask)
+{
+    (void) mask;
+    if (get_file_type(path) >= 0)
+        return 0;
+    return -ENOENT;
+}
+
+static int zipfuse_statfs(const char* path, struct statvfs* stbuf){
+
+    // if stat for the file at current path cannot be found, then return error.
+    if (statvfs(path, stbuf) == -1)
+    return -errno;
+    return 0;
 }
 
 // override the fuse operations with our custom functions to operate on zip file
 static struct fuse_operations zipfuse_oper = {
-	.getattr    = zipfuse_getattr,
-	.readdir    = zipfuse_readdir,
 	.open       = zipfuse_open,
+    .destroy    = zipfuse_destroy,
+    .getattr    = zipfuse_getattr,
+	.readdir    = zipfuse_readdir,
 	.read       = zipfuse_read,
+    .write      = zipfuse_write,
+    .mkdir      = zipfuse_mkdir,
+    .unlink     = zipfuse_unlink,
+    .rmdir      = zipfuse_rmdir,
+	.access     = zipfuse_access,
+    .statfs     = zipfuse_statfs
 };
 
 int main(int argc, char *argv[]) {
